@@ -560,10 +560,9 @@ class SpeechToTextPlugin :
 
     private fun setupBluetooth() {
         if (bluetoothDisabled) return
-
         val bluetoothManager = pluginContext?.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-bluetoothAdapter = bluetoothManager.adapter
-pairedDevices = bluetoothAdapter?.bondedDevices
+        bluetoothAdapter = bluetoothManager.adapter
+        pairedDevices = bluetoothAdapter?.bondedDevices
 
         val mProfileListener = object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
