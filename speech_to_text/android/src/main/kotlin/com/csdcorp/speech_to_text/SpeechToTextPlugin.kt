@@ -1,11 +1,11 @@
 package com.csdcorp.speech_to_text
 
 import android.Manifest
-import android.R.attr.data
 import android.annotation.TargetApi
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -18,9 +18,12 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.*
-import android.speech.SpeechRecognizer.createOnDeviceSpeechRecognizer
-import android.speech.SpeechRecognizer.createSpeechRecognizer
+import android.speech.RecognitionListener
+import android.speech.RecognitionService
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
@@ -38,7 +41,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.*
 import java.util.concurrent.Executors
-
 
 enum class SpeechToTextErrors {
     multipleRequests,
@@ -76,11 +78,11 @@ enum class ListenMode {
 const val pluginChannelName = "plugin.csdcorp.com/speech_to_text"
 
 @TargetApi(8)
-/** SpeechToTextPlugin */
-public class SpeechToTextPlugin :
-        MethodCallHandler, RecognitionListener,
-        PluginRegistry.RequestPermissionsResultListener, FlutterPlugin,
-        ActivityAware {
+class SpeechToTextPlugin :
+    MethodCallHandler, RecognitionListener,
+    PluginRegistry.RequestPermissionsResultListener, FlutterPlugin,
+    ActivityAware {
+
     private var pluginContext: Context? = null
     private var channel: MethodChannel? = null
     private val minSdkForSpeechSupport = 21
@@ -99,13 +101,13 @@ public class SpeechToTextPlugin :
     private var debugLogging: Boolean = false
     private var alwaysUseStop: Boolean = false
     private var intentLookup: Boolean = false
-    private var noBluetoothOpt: Boolean = false // user-defined option
-    private var bluetoothDisabled = true // final bluetooth state (combines user-defined option and permissions)
+    private var noBluetoothOpt: Boolean = false
+    private var bluetoothDisabled = true
     private var resultSent: Boolean = false
     private var lastOnDevice: Boolean = false
     private var speechRecognizer: SpeechRecognizer? = null
     private var recognizerIntent: Intent? = null
-    private var bluetoothAdapter: android.bluetooth.BluetoothAdapter? = null
+    private var bluetoothAdapter: BluetoothAdapter? = null
     private var pairedDevices: Set<android.bluetooth.BluetoothDevice>? = null
     private var activeBluetooth: android.bluetooth.BluetoothDevice? = null
     private var bluetoothHeadset: BluetoothHeadset? = null
@@ -120,18 +122,17 @@ public class SpeechToTextPlugin :
     private val defaultLanguageTag: String = Locale.getDefault().toLanguageTag()
 
     override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
-
-        onAttachedToEngine(flutterPluginBinding.getApplicationContext(), flutterPluginBinding.getBinaryMessenger());
+        onAttachedToEngine(flutterPluginBinding.applicationContext, flutterPluginBinding.binaryMessenger)
     }
 
     private fun onAttachedToEngine(applicationContext: Context, messenger: BinaryMessenger) {
-        this.pluginContext = applicationContext;
+        this.pluginContext = applicationContext
         channel = MethodChannel(messenger, pluginChannelName)
         channel?.setMethodCallHandler(this)
     }
 
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
-        this.pluginContext = null;
+        this.pluginContext = null
         channel?.setMethodCallHandler(null)
         channel = null
     }
@@ -183,22 +184,24 @@ public class SpeechToTextPlugin :
                     if (null == localeId) {
                         localeId = defaultLanguageTag
                     }
-                    localeId = localeId.replace( '_', '-')
+                    localeId = localeId.replace('_', '-')
                     var partialResults = call.argument<Boolean>("partialResults")
                     if (null == partialResults) {
                         partialResults = true
                     }
                     var onDevice = call.argument<Boolean>("onDevice")
-                    if ( null == onDevice ) {
+                    if (null == onDevice) {
                         onDevice = false
                     }
                     val listenModeIndex = call.argument<Int>("listenMode")
-                    if ( null == listenModeIndex ) {
-                        result.error(SpeechToTextErrors.missingOrInvalidArg.name,
-                                "listenMode is required", null)
+                    if (null == listenModeIndex) {
+                        result.error(
+                            SpeechToTextErrors.missingOrInvalidArg.name,
+                            "listenMode is required", null
+                        )
                         return
                     }
-                    startListening(result, localeId, partialResults, listenModeIndex, onDevice )
+                    startListening(result, localeId, partialResults, listenModeIndex, onDevice)
                 }
                 "stop" -> stopListening(result)
                 "cancel" -> cancelListening(result)
@@ -207,8 +210,10 @@ public class SpeechToTextPlugin :
             }
         } catch (exc: Exception) {
             Log.e(logTag, "Unexpected exception", exc)
-            result.error(SpeechToTextErrors.unknown.name,
-                    "Unexpected exception", exc.localizedMessage)
+            result.error(
+                SpeechToTextErrors.unknown.name,
+                "Unexpected exception", exc.localizedMessage
+            )
         }
     }
 
@@ -220,8 +225,10 @@ public class SpeechToTextPlugin :
         debugLog("Start has_permission")
         val localContext = pluginContext
         if (localContext != null) {
-            val hasPerm = ContextCompat.checkSelfPermission(localContext,
-                    Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            val hasPerm = ContextCompat.checkSelfPermission(
+                localContext,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
             result.success(hasPerm)
         }
     }
@@ -234,8 +241,10 @@ public class SpeechToTextPlugin :
         recognizerStops = Build.VERSION.SDK_INT != brokenStopSdk || alwaysUseStop
         debugLog("Start initialize")
         if (null != activeResult) {
-            result.error(SpeechToTextErrors.multipleRequests.name,
-                    "Only one initialize at a time", null)
+            result.error(
+                SpeechToTextErrors.multipleRequests.name,
+                "Only one initialize at a time", null
+            )
             return
         }
         activeResult = result
@@ -243,10 +252,7 @@ public class SpeechToTextPlugin :
     }
 
     private fun sdkVersionTooLow(): Boolean {
-        if (Build.VERSION.SDK_INT < minSdkForSpeechSupport) {
-            return true;
-        }
-        return false;
+        return Build.VERSION.SDK_INT < minSdkForSpeechSupport
     }
 
     private fun isNotInitialized(): Boolean {
@@ -261,8 +267,10 @@ public class SpeechToTextPlugin :
         return !listening
     }
 
-    private fun startListening(result: Result, languageTag: String, partialResults: Boolean,
-                               listenModeIndex: Int, onDevice: Boolean) {
+    private fun startListening(
+        result: Result, languageTag: String, partialResults: Boolean,
+        listenModeIndex: Int, onDevice: Boolean
+    ) {
         if (sdkVersionTooLow() || isNotInitialized() || isListening()) {
             result.success(false)
             return
@@ -276,7 +284,7 @@ public class SpeechToTextPlugin :
         debugLog("Start listening")
 
         optionallyStartBluetooth()
-        setupRecognizerIntent(languageTag, partialResults, listenMode, onDevice )
+        setupRecognizerIntent(languageTag, partialResults, listenMode, onDevice)
         handler.post {
             run {
                 speechRecognizer?.startListening(recognizerIntent)
@@ -289,17 +297,16 @@ public class SpeechToTextPlugin :
     }
 
     private fun optionallyStartBluetooth() {
-        if ( bluetoothDisabled ) return
+        if (bluetoothDisabled) return
         val context = pluginContext
         val lbt = bluetoothAdapter
         val lpaired = pairedDevices
         val lhead = bluetoothHeadset
-        if (null != lbt && null!= lhead && null != lpaired && lbt.isEnabled) {
+        if (null != lbt && null != lhead && null != lpaired && lbt.isEnabled) {
             for (tryDevice in lpaired) {
-                //This loop tries to start VoiceRecognition mode on every paired device until it finds one that works(which will be the currently in use bluetooth headset)
                 if (lhead.startVoiceRecognition(tryDevice)) {
                     debugLog("Starting bluetooth voice recognition")
-                    activeBluetooth = tryDevice;
+                    activeBluetooth = tryDevice
                     break
                 }
             }
@@ -317,7 +324,7 @@ public class SpeechToTextPlugin :
                 speechRecognizer?.stopListening()
             }
         }
-        if ( !recognizerStops ) {
+        if (!recognizerStops) {
             destroyRecognizer()
         }
         notifyListening(isRecording = false)
@@ -336,7 +343,7 @@ public class SpeechToTextPlugin :
                 speechRecognizer?.cancel()
             }
         }
-        if ( !recognizerStops ) {
+        if (!recognizerStops) {
             destroyRecognizer()
         }
         notifyListening(isRecording = false)
@@ -349,28 +356,28 @@ public class SpeechToTextPlugin :
             result.success(false)
             return
         }
-        var hasPermission = ContextCompat.checkSelfPermission(pluginContext!!,
-            Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        var hasPermission = ContextCompat.checkSelfPermission(
+            pluginContext!!,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
         if (Build.VERSION.SDK_INT >= 33 && hasPermission) {
-            if ( SpeechRecognizer.isOnDeviceRecognitionAvailable(pluginContext!!)) {
-                // after much experimentation this was the only working iteration of the
-                // checkRecognitionSupport that works.
-            var recognizer = createOnDeviceSpeechRecognizer(pluginContext!!)
-            var recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-//            var recognizer = createSpeechRecognizer(pluginContext!!)
-//            var recognizerIntent = Intent(RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS)
-            recognizer?.checkRecognitionSupport(recognizerIntent, Executors.newSingleThreadExecutor(),
-                object : RecognitionSupportCallback {
-                    override fun onSupportResult(recognitionSupport: RecognitionSupport) {
-                        var details = LanguageDetailsChecker( result, debugLogging )
-                        details.createResponse(recognitionSupport.supportedOnDeviceLanguages )
-                        recognizer?.destroy()
-                    }
-                    override fun onError(error: Int) {
-                        debugLog("error from checkRecognitionSupport: " + error)
-                        recognizer?.destroy()
-                    }
-                })
+            if (SpeechRecognizer.isOnDeviceRecognitionAvailable(pluginContext!!)) {
+                var recognizer = createOnDeviceSpeechRecognizer(pluginContext!!)
+                var recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                recognizer?.checkRecognitionSupport(
+                    recognizerIntent, Executors.newSingleThreadExecutor(),
+                    object : RecognitionSupportCallback {
+                        override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                            var details = LanguageDetailsChecker(result, debugLogging)
+                            details.createResponse(recognitionSupport.supportedOnDeviceLanguages)
+                            recognizer?.destroy()
+                        }
+
+                        override fun onError(error: Int) {
+                            debugLog("error from checkRecognitionSupport: $error")
+                            recognizer?.destroy()
+                        }
+                    })
             }
         } else {
             var detailsIntent = RecognizerIntent.getVoiceDetailsIntent(pluginContext)
@@ -379,45 +386,48 @@ public class SpeechToTextPlugin :
                 detailsIntent.setPackage("com.google.android.googlequicksearchbox")
             }
             pluginContext?.sendOrderedBroadcast(
-                    detailsIntent, null, LanguageDetailsChecker(result, debugLogging),
-                    null, Activity.RESULT_OK, null, null)
+                detailsIntent, null, LanguageDetailsChecker(result, debugLogging),
+                null, Activity.RESULT_OK, null, null
+            )
         }
     }
 
-    private fun notifyListening(isRecording: Boolean ) {
-        if ( listening == isRecording ) return;
+    private fun notifyListening(isRecording: Boolean) {
+        if (listening == isRecording) return
         listening = isRecording
         val status = when (isRecording) {
             true -> SpeechToTextStatus.listening.name
             false -> SpeechToTextStatus.notListening.name
         }
-        debugLog("Notify status:" + status)
+        debugLog("Notify status:$status")
         channel?.invokeMethod(SpeechToTextCallbackMethods.notifyStatus.name, status)
-        if ( !isRecording ) {
-            val doneStatus = when( resultSent) {
+        if (!isRecording) {
+            val doneStatus = when (resultSent) {
                 false -> SpeechToTextStatus.doneNoResult.name
                 else -> SpeechToTextStatus.done.name
             }
-            debugLog("Notify status:" + doneStatus )
-            optionallyStopBluetooth();
-            channel?.invokeMethod(SpeechToTextCallbackMethods.notifyStatus.name,
-                doneStatus )
+            debugLog("Notify status:$doneStatus")
+            optionallyStopBluetooth()
+            channel?.invokeMethod(
+                SpeechToTextCallbackMethods.notifyStatus.name,
+                doneStatus
+            )
         }
     }
 
     private fun optionallyStopBluetooth() {
-        if ( bluetoothDisabled ) return
+        if (bluetoothDisabled) return
         val lactive = activeBluetooth
         val lbt = bluetoothHeadset
-        if (null != lactive && null != lbt ) {
+        if (null != lactive && null != lbt) {
             debugLog("Stopping bluetooth voice recognition")
             lbt.stopVoiceRecognition(lactive)
             activeBluetooth = null
         }
     }
-    
+
     private fun updateResults(speechBundle: Bundle?, isFinal: Boolean) {
-        if (isDuplicateFinal( isFinal )) {
+        if (isDuplicateFinal(isFinal)) {
             debugLog("Discarding duplicate final")
             return
         }
@@ -441,15 +451,17 @@ public class SpeechToTextPlugin :
             val jsonResult = speechResult.toString()
             debugLog("Calling results callback")
             resultSent = true
-            channel?.invokeMethod(SpeechToTextCallbackMethods.textRecognition.name,
-                    jsonResult)
+            channel?.invokeMethod(
+                SpeechToTextCallbackMethods.textRecognition.name,
+                jsonResult
+            )
         } else {
             debugLog("Results null or empty")
         }
     }
 
-    private fun isDuplicateFinal( isFinal: Boolean ) : Boolean {
-        if ( !isFinal ) {
+    private fun isDuplicateFinal(isFinal: Boolean): Boolean {
+        if (!isFinal) {
             return false
         }
         val delta = System.currentTimeMillis() - lastFinalTime
@@ -463,10 +475,14 @@ public class SpeechToTextPlugin :
             completeInitialize()
             return
         }
-        permissionToRecordAudio = ContextCompat.checkSelfPermission(localContext,
-                Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        val permissionToEnableBluetooth = ContextCompat.checkSelfPermission(localContext,
-                Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        permissionToRecordAudio = ContextCompat.checkSelfPermission(
+            localContext,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        val permissionToEnableBluetooth = ContextCompat.checkSelfPermission(
+            localContext,
+            Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
         bluetoothDisabled = !permissionToEnableBluetooth || noBluetoothOpt
         debugLog("Checked permission")
         if (!permissionToRecordAudio) {
@@ -474,10 +490,12 @@ public class SpeechToTextPlugin :
             if (null != localActivity) {
                 debugLog("Requesting permission")
                 var requiredPermissions = arrayOf(Manifest.permission.RECORD_AUDIO)
-                if ( !noBluetoothOpt ) {
+                if (!noBluetoothOpt) {
                     requiredPermissions = requiredPermissions.plus(Manifest.permission.BLUETOOTH_CONNECT)
                 }
-                ActivityCompat.requestPermissions(localActivity, requiredPermissions, speechToTextPermissionCode)
+                ActivityCompat.requestPermissions(
+                    localActivity, requiredPermissions, speechToTextPermissionCode
+                )
             } else {
                 debugLog("no permission, no activity, completing")
                 completeInitialize()
@@ -490,7 +508,6 @@ public class SpeechToTextPlugin :
     }
 
     private fun completeInitialize() {
-
         debugLog("completeInitialize")
         if (permissionToRecordAudio) {
             debugLog("Testing recognition availability")
@@ -525,8 +542,9 @@ public class SpeechToTextPlugin :
                 debugLog("null context during initialization")
                 activeResult?.success(false)
                 activeResult?.error(
-                        SpeechToTextErrors.missingContext.name,
-                        "context unexpectedly null, initialization failed", "")
+                    SpeechToTextErrors.missingContext.name,
+                    "context unexpectedly null, initialization failed", ""
+                )
                 activeResult = null
                 return
             }
@@ -540,37 +558,46 @@ public class SpeechToTextPlugin :
     }
 
     private fun setupBluetooth() {
-        if ( bluetoothDisabled ) return
-val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdapter?.getBondedDevices()
+        if (bluetoothDisabled) return
 
-        val mProfileListener: BluetoothProfile.ServiceListener = object : BluetoothProfile.ServiceListener {
+        val bluetoothManager = pluginContext?.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        bluetoothAdapter = bluetoothManager.adapter
+        pairedDevices = bluetoothAdapter?.bondedDevices
+
+        val mProfileListener = object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                 if (profile == BluetoothProfile.HEADSET) {
                     bluetoothHeadset = proxy as BluetoothHeadset
-                    debugLog("Found a headset: " + bluetoothHeadset.toString())
+                    debugLog("Found a headset: ${bluetoothHeadset.toString()}")
                 }
             }
 
             override fun onServiceDisconnected(profile: Int) {
                 if (profile == BluetoothProfile.HEADSET) {
-                    debugLog("Clearing headset: ")
+                    debugLog("Clearing headset")
                     bluetoothHeadset = null
                 }
             }
         }
+
         bluetoothAdapter?.getProfileProxy(pluginContext, mProfileListener, BluetoothProfile.HEADSET)
     }
 
     private fun Context.findComponentName(): ComponentName? {
-        val list: List<ResolveInfo> = packageManager.queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
+        val list: List<ResolveInfo> = packageManager.queryIntentServices(
+            Intent(RecognitionService.SERVICE_INTERFACE), 0
+        )
         debugLog("RecognitionService, found: ${list.size}")
-        list.forEach() { it.serviceInfo?.let { it1 -> debugLog("RecognitionService: packageName: ${it1.packageName}, name: ${it1.name}") } }
+        list.forEach() {
+            it.serviceInfo?.let { it1 ->
+                debugLog("RecognitionService: packageName: ${it1.packageName}, name: ${it1.name}")
+            }
+        }
         return list.firstOrNull()?.serviceInfo?.let { ComponentName(it.packageName, it.name) }
     }
 
     private fun createRecognizer(onDevice: Boolean, listenMode: ListenMode) {
-        if ( null != speechRecognizer && onDevice == lastOnDevice ) {
+        if (null != speechRecognizer && onDevice == lastOnDevice) {
             return
         }
         lastOnDevice = onDevice
@@ -588,20 +615,20 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
                         setRecognitionListener(this@SpeechToTextPlugin)
                     }
                 } else {
-                        var supportsLocal = false
+                    var supportsLocal = false
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && onDevice) {
                         supportsLocal = SpeechRecognizer.isOnDeviceRecognitionAvailable(pluginContext!!)
-                        if (supportsLocal ) {
+                        if (supportsLocal) {
                             speechRecognizer = createOnDeviceSpeechRecognizer(pluginContext!!).apply {
                                 debugLog("Setting on device listener")
                                 setRecognitionListener(this@SpeechToTextPlugin)
                             }
                         }
                     }
-                    if ( null == speechRecognizer) {
-                            speechRecognizer = createSpeechRecognizer(pluginContext).apply {
-                                debugLog("Setting default listener")
-                                setRecognitionListener(this@SpeechToTextPlugin)
+                    if (null == speechRecognizer) {
+                        speechRecognizer = createSpeechRecognizer(pluginContext).apply {
+                            debugLog("Setting default listener")
+                            setRecognitionListener(this@SpeechToTextPlugin)
                         }
                     }
                 }
@@ -616,16 +643,19 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
             }
         }
         debugLog("before setup intent")
-        setupRecognizerIntent(defaultLanguageTag, true, listenMode, false )
+        setupRecognizerIntent(defaultLanguageTag, true, listenMode, false)
         debugLog("after setup intent")
     }
 
-    private fun setupRecognizerIntent(languageTag: String, partialResults: Boolean, listenMode: ListenMode, onDevice: Boolean ) {
+    private fun setupRecognizerIntent(
+        languageTag: String, partialResults: Boolean, listenMode: ListenMode, onDevice: Boolean
+    ) {
         debugLog("setupRecognizerIntent")
         if (previousRecognizerLang == null ||
-                previousRecognizerLang != languageTag ||
-                partialResults != previousPartialResults || previousListenMode != listenMode ) {
-            previousRecognizerLang = languageTag;
+            previousRecognizerLang != languageTag ||
+            partialResults != previousPartialResults || previousListenMode != listenMode
+        ) {
+            previousRecognizerLang = languageTag
             previousPartialResults = partialResults
             previousListenMode = listenMode
             handler.post {
@@ -633,28 +663,35 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
                     recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                         debugLog("In RecognizerIntent apply")
                         if (listenMode == ListenMode.search) {
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_WEB_SEARCH)
-                        }
-                        else {
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                            putExtra(
+                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                RecognizerIntent.LANGUAGE_MODEL_WEB_SEARCH
+                            )
+                        } else {
+                            putExtra(
+                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                            )
                         }
                         debugLog("put model")
                         val localContext = pluginContext
                         if (null != localContext) {
-                            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE,
-                                    localContext.applicationInfo.packageName)
+                            putExtra(
+                                RecognizerIntent.EXTRA_CALLING_PACKAGE,
+                                localContext.applicationInfo.packageName
+                            )
                         }
                         debugLog("put package")
                         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, partialResults)
                         debugLog("put partial")
                         if (languageTag != Locale.getDefault().toLanguageTag()) {
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag);
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
                             debugLog("put languageTag")
                         }
-                        if ( onDevice ) {
-                            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, onDevice );
+                        if (onDevice) {
+                            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, onDevice)
                         }
-                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,10)
+                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 10)
                     }
                 }
             }
@@ -662,16 +699,18 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
     }
 
     private fun destroyRecognizer() {
-
-        handler.postDelayed( {
-                run {
-                    debugLog("Recognizer destroy")
-                    speechRecognizer?.destroy();
-                    speechRecognizer = null;
-                }
-        }, 50 )
+        handler.postDelayed({
+            run {
+                debugLog("Recognizer destroy")
+                speechRecognizer?.destroy()
+                speechRecognizer = null
+            }
+        }, 50)
     }
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray): Boolean {
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ): Boolean {
         when (requestCode) {
             speechToTextPermissionCode -> {
                 permissionToRecordAudio = grantResults.isNotEmpty() &&
@@ -686,7 +725,6 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
         return false
     }
 
-
     override fun onPartialResults(results: Bundle?) = updateResults(results, false)
     override fun onResults(results: Bundle?) = updateResults(results, true)
     override fun onEndOfSpeech() = notifyListening(isRecording = false)
@@ -694,10 +732,10 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
     override fun onError(errorCode: Int) {
         val delta = System.currentTimeMillis() - speechStartTime
         var errorReturn = errorCode
-        if ( SpeechRecognizer.ERROR_NO_MATCH == errorCode && maxRms < speechThresholdRms ) {
+        if (SpeechRecognizer.ERROR_NO_MATCH == errorCode && maxRms < speechThresholdRms) {
             errorReturn = SpeechRecognizer.ERROR_SPEECH_TIMEOUT
         }
-        debugLog( "Error $errorCode after start at $delta $minRms / $maxRms")
+        debugLog("Error $errorCode after start at $delta $minRms / $maxRms")
         val errorMsg = when (errorReturn) {
             SpeechRecognizer.ERROR_AUDIO -> "error_audio_error"
             SpeechRecognizer.ERROR_CLIENT -> "error_client"
@@ -716,14 +754,14 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
         }
 
         sendError(errorMsg)
-        if ( isListening()) {
+        if (isListening()) {
             notifyListening(false)
         }
     }
 
-    private fun debugLog( msg: String ) {
-        if ( debugLogging ) {
-            Log.d( logTag, msg )
+    private fun debugLog(msg: String) {
+        if (debugLogging) {
+            Log.d(logTag, msg)
         }
     }
 
@@ -739,10 +777,10 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
     }
 
     override fun onRmsChanged(rmsdB: Float) {
-        if ( rmsdB < minRms ) {
+        if (rmsdB < minRms) {
             minRms = rmsdB
         }
-        if ( rmsdB > maxRms ) {
+        if (rmsdB > maxRms) {
             maxRms = rmsdB
         }
         debugLog("rmsDB $minRms / $maxRms")
@@ -759,34 +797,32 @@ bluetoothAdapter = bluetoothManager.adapter        pairedDevices = bluetoothAdap
     override fun onBeginningOfSpeech() {}
 }
 
-// See https://stackoverflow.com/questions/10538791/how-to-set-the-language-in-speech-recognition-on-android/10548680#10548680
-class LanguageDetailsChecker(flutterResult: Result, logging: Boolean ) : BroadcastReceiver() {
+class LanguageDetailsChecker(flutterResult: Result, logging: Boolean) : BroadcastReceiver() {
     private val logTag = "SpeechToTextPlugin"
     private val result: Result = flutterResult
     private val debugLogging: Boolean = logging
     private var supportedLanguages: List<String>? = null
-
     private var languagePreference: String? = null
 
     override fun onReceive(context: Context, intent: Intent) {
-        debugLog( "Received extra language broadcast" )
+        debugLog("Received extra language broadcast")
         val results = getResultExtras(true)
         if (results.containsKey(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE)) {
             languagePreference = results.getString(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE)
         }
         if (results.containsKey(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES)) {
-            debugLog( "Extra supported languages" )
+            debugLog("Extra supported languages")
             supportedLanguages = results.getStringArrayList(
-                    RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES)
+                RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES
+            )
             createResponse(supportedLanguages)
-        }
-        else {
-            debugLog(  "No extra supported languages" )
-            createResponse( ArrayList<String>())
+        } else {
+            debugLog("No extra supported languages")
+            createResponse(ArrayList<String>())
         }
     }
 
-    public fun createResponse(supportedLanguages: List<String>?) {
+    fun createResponse(supportedLanguages: List<String>?) {
         val currentLocale = Locale.getDefault()
         val localeNames = ArrayList<String>()
         localeNames.add(buildIdNameForLocale(currentLocale))
@@ -800,7 +836,6 @@ class LanguageDetailsChecker(flutterResult: Result, logging: Boolean ) : Broadca
             }
         }
         result.success(localeNames)
-
     }
 
     private fun buildIdNameForLocale(locale: Locale): String {
@@ -808,24 +843,21 @@ class LanguageDetailsChecker(flutterResult: Result, logging: Boolean ) : Broadca
         return "${locale.language}_${locale.country}:$name"
     }
 
-    private fun debugLog( msg: String ) {
-        if ( debugLogging ) {
-            Log.d( logTag, msg )
+    private fun debugLog(msg: String) {
+        if (debugLogging) {
+            Log.d(logTag, msg)
         }
     }
 }
 
 private class ChannelResultWrapper(result: Result) : Result {
-    // Caller handler
     val handler: Handler = Handler(Looper.getMainLooper())
     val result: Result = result
 
-    // make sure to respond in the caller thread
     override fun success(results: Any?) {
-
         handler.post {
             run {
-                result.success(results);
+                result.success(results)
             }
         }
     }
@@ -833,7 +865,7 @@ private class ChannelResultWrapper(result: Result) : Result {
     override fun error(errorCode: String, errorMessage: String?, data: Any?) {
         handler.post {
             run {
-                result.error(errorCode, errorMessage, data);
+                result.error(errorCode, errorMessage, data)
             }
         }
     }
@@ -841,7 +873,7 @@ private class ChannelResultWrapper(result: Result) : Result {
     override fun notImplemented() {
         handler.post {
             run {
-                result.notImplemented();
+                result.notImplemented()
             }
         }
     }
