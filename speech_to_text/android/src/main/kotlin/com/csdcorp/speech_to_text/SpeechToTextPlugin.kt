@@ -1,5 +1,6 @@
 package com.csdcorp.speech_to_text
-
+import android.bluetooth.BluetoothManager
+import android.content.Context
 import android.Manifest
 import android.annotation.TargetApi
 import android.app.Activity
@@ -561,8 +562,8 @@ class SpeechToTextPlugin :
         if (bluetoothDisabled) return
 
         val bluetoothManager = pluginContext?.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        bluetoothAdapter = bluetoothManager.adapter
-        pairedDevices = bluetoothAdapter?.bondedDevices
+bluetoothAdapter = bluetoothManager.adapter
+pairedDevices = bluetoothAdapter?.bondedDevices
 
         val mProfileListener = object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
